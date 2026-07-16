@@ -1,0 +1,6 @@
+# 個人交易紀錄，不上傳
+data.json
+data.json.tmp
+
+__pycache__/
+*.pyc

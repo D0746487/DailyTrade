@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>台股當沖模擬器</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">📈 台股當沖模擬器</div>
+  <button id="calBtn" class="cal-btn" title="損益月曆">📅</button>
+  <div class="search-wrap">
+    <input id="searchInput" type="text" placeholder="搜尋股票代碼或名稱，如 2330" autocomplete="off">
+    <div id="searchDropdown" class="search-dropdown hidden"></div>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- 左側：我的最愛 / 庫存 -->
+  <aside class="left-panel">
+    <div class="left-tabs">
+      <button class="ltab active" data-pane="fav">⭐ 我的最愛</button>
+      <button class="ltab" data-pane="hold">📦 庫存</button>
+    </div>
+    <div id="favList" class="side-list"></div>
+    <div id="holdList" class="side-list hidden"></div>
+  </aside>
+
+  <!-- 中間：報價 + K線圖 -->
+  <section class="chart-panel">
+    <div id="quoteBar" class="quote-bar">
+      <div class="placeholder">請在右上角搜尋並選擇股票</div>
+    </div>
+
+    <div class="chart-toolbar">
+      <div class="interval-tabs">
+        <button class="tab" data-interval="1m">1分K</button>
+        <button class="tab" data-interval="5m">5分K</button>
+        <button class="tab active" data-interval="1d">日K</button>
+      </div>
+      <div id="maLegend" class="ma-legend"></div>
+      <div id="chartStatus" class="chart-status"></div>
+    </div>
+
+    <div id="chart" class="chart-container"></div>
+    <div class="chart-note">資料來源：臺灣證券交易所 / 櫃買中心即時行情；分K歷史取自 Yahoo Finance（近 5 個交易日，每分鐘自動回補），盤中最新分K由證交所即時行情合成。</div>
+  </section>
+
+  <!-- 右側：五檔 + 模擬下單 -->
+  <aside class="side-panel">
+    <div class="card">
+      <div class="card-title">五檔報價</div>
+      <table class="depth-table" id="depthTable">
+        <thead><tr><th>買量</th><th>買價</th><th>賣價</th><th>賣量</th></tr></thead>
+        <tbody>
+          <tr><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+          <tr><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+          <tr><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+          <tr><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+          <tr><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title">模擬下單 <span class="hint">（市價、單位：張）</span></div>
+      <div class="order-row">
+        <label>數量</label>
+        <input id="orderQty" type="number" min="1" step="1" value="1">
+      </div>
+      <div class="order-buttons">
+        <button id="btnBuy" class="btn-buy" disabled>買進</button>
+        <button id="btnSell" class="btn-sell" disabled>賣出 / 放空</button>
+      </div>
+      <div class="fee-note">手續費 0.1425%（低消 20 元）、賣出證交稅 0.15%（當沖減半）。所有損益均已內含費用與稅。</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">帳戶 <button id="btnReset" class="btn-reset">重置</button></div>
+      <div class="acct-grid">
+        <div>現金</div><div id="acctCash" class="mono">-</div>
+        <div>部位</div><div id="acctPos" class="mono">-</div>
+        <div>均價</div><div id="acctAvg" class="mono">-</div>
+        <div>未實現損益</div><div id="acctUnrealized" class="mono">-</div>
+        <div>已實現損益</div><div id="acctRealized" class="mono">-</div>
+        <div>總資產</div><div id="acctTotal" class="mono">-</div>
+      </div>
+    </div>
+
+    <div class="card grow">
+      <div class="card-title">交易紀錄</div>
+      <div id="tradeLog" class="trade-log"><div class="placeholder">尚無交易</div></div>
+    </div>
+  </aside>
+</main>
+
+<!-- 損益月曆彈窗 -->
+<div id="calModal" class="modal hidden">
+  <div class="modal-box">
+    <div class="cal-header">
+      <span class="cal-title">損益月曆</span>
+      <div class="cal-nav">
+        <button id="calPrev" title="上個月">‹</button>
+        <span id="calMonthLabel"></span>
+        <button id="calNext" title="下個月">›</button>
+      </div>
+      <button id="calClose" title="關閉">✕</button>
+    </div>
+    <div class="cal-summary" id="calSummary"></div>
+    <div class="cal-grid" id="calGrid"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
