@@ -239,13 +239,24 @@ body {
   .layout { grid-template-columns: 200px 1fr 280px; }
 }
 
-/* 窄螢幕改為單欄堆疊：K線優先，最愛/庫存次之，下單第三 */
+/* 窄螢幕改為單欄堆疊：K線優先，最愛/庫存次之，下單第三。
+   關鍵：解除桌面版的高度鎖定(min-height:0/flex)，讓整頁自然向下捲動 */
 @media (max-width: 900px) {
-  body { overflow: auto; }
-  .layout { grid-template-columns: 1fr; overflow-y: auto; gap: 10px; padding: 10px; }
+  body { overflow-y: auto; }
+  .layout {
+    grid-template-columns: 1fr;
+    flex: none;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    gap: 10px;
+    padding: 10px;
+  }
   .chart-panel { order: 1; min-height: auto; }
-  .left-panel { order: 2; max-height: 300px; }
-  .side-panel { order: 3; overflow-y: visible; }
+  .left-panel { order: 2; min-height: auto; max-height: 320px; }
+  .side-panel { order: 3; min-height: auto; overflow: visible; }
+  .card.grow { min-height: auto; }
+  .trade-log { max-height: 260px; }
   .chart-container { flex: none; height: 46vh; min-height: 280px; }
   .search-wrap { width: min(320px, 55vw); }
 }
