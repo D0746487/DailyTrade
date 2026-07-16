@@ -528,8 +528,8 @@ function renderFavorites() {
   }
 }
 
-// 部位淨損益：價差 - 已付進場費用 - 預估出場費用（手續費；多單平倉另有證交稅）
-// 與帳戶現金增減一致
+// 部位淨損益：價差 - 已付進場費用 - 預估出場費用
+// 稅率依當沖(0.15%)/留倉(0.3%)自動拆算，與帳戶現金增減一致
 function positionPnl(pos, price) {
   const absQty = Math.abs(pos.qty);
   const shares = absQty * 1000;
@@ -538,7 +538,12 @@ function positionPnl(pos, price) {
     : (pos.avg - price) * shares;
   const exitAmount = price * shares;
   const exitFee = fee(exitAmount);
-  const exitTax = pos.qty > 0 ? Math.round(exitAmount * TAX_RATE) : 0;
+  const dayQty = pos.todayDate === keyOf(new Date())
+    ? Math.min(pos.todayQty || 0, absQty) : 0;
+  const carryQty = absQty - dayQty;
+  const exitTax = pos.qty > 0
+    ? Math.round(price * 1000 * (dayQty * TAX_DT + carryQty * TAX_NORMAL))
+    : Math.round(pos.avg * 1000 * carryQty * (TAX_NORMAL - TAX_DT)); // 留倉空單補稅
   const net = gross - (pos.feePaid || 0) - exitFee - exitTax;
   const cost = pos.avg * shares;
   return { net, rate: cost ? (net / cost) * 100 : null };
@@ -607,11 +612,21 @@ function renderDepth() {
 }
 
 // ────────────────────────── 模擬交易 ──────────────────────────
-const FEE_RATE = 0.001425;  // 手續費 0.1425%
+const FEE_RATE = 0.001425;   // 手續費 0.1425%
 const FEE_MIN = 20;
-const TAX_RATE = 0.0015;    // 當沖證交稅減半 0.15%（賣出時收）
+const TAX_DT = 0.0015;       // 現股當沖證交稅（減半 0.15%）
+const TAX_NORMAL = 0.003;    // 一般交易證交稅 0.3%（留倉後賣出）
 
 function fee(amount) { return Math.max(FEE_MIN, Math.round(amount * FEE_RATE)); }
+
+// 換日歸零「今日建立張數」：留倉部位賣出時改按一般稅率
+function rolloverPos(pos) {
+  const today = keyOf(new Date());
+  if (pos.todayDate !== today) {
+    pos.todayQty = 0;
+    pos.todayDate = today;
+  }
+}
 
 function trade(side) {
   const q = state.quote;
@@ -624,47 +639,69 @@ function trade(side) {
   const f = fee(amount);
 
   const pos = account.positions[cur.code] ||
-    { qty: 0, avg: 0, feePaid: 0, name: cur.name };
+    { qty: 0, avg: 0, feePaid: 0, todayQty: 0, todayDate: null, name: cur.name };
   pos.name = cur.name;
   pos.feePaid = pos.feePaid || 0;   // 進場累計費用（手續費+稅），平倉時按比例攤入損益
+  pos.todayQty = pos.todayQty || 0; // 今日建立的張數（判別當沖/留倉稅率）
+  rolloverPos(pos);
   const signedQty = side === "buy" ? qty : -qty;
+  const perLot = price * 1000;      // 每張成交金額
 
   let tax = 0;
-  if (side === "sell") tax = Math.round(amount * TAX_RATE);
-
   let netRealized = null;           // 平倉才有值：含進出場手續費與稅的淨損益
 
   if (pos.qty === 0 || Math.sign(pos.qty) === Math.sign(signedQty)) {
     // 建倉 / 加碼（做多或加空）
+    // 放空進場先按當沖稅率課徵，若留倉則於回補時補足差額
+    if (side === "sell") tax = Math.round(amount * TAX_DT);
     const newQty = pos.qty + signedQty;
     pos.avg = (pos.avg * Math.abs(pos.qty) + price * qty) / Math.abs(newQty);
     pos.qty = newQty;
+    pos.todayQty += qty;
     pos.feePaid += f + tax;
   } else {
-    // 反向 → 平倉（平多或空單回補）
+    // 反向 → 平倉（平多或空單回補），稅率依當沖/留倉自動拆算
     const absBefore = Math.abs(pos.qty);
     const closeQty = Math.min(qty, absBefore);
+    const openQty = qty - closeQty;                       // 反手新倉部分
+    const dayQty = Math.min(closeQty, pos.todayQty);      // 當沖相抵張數
+    const carryQty = closeQty - dayQty;                   // 留倉張數
+
+    let taxClose = 0;
+    if (side === "sell") {
+      // 平多：當沖 0.15%、留倉 0.3%；反手放空部分先按當沖稅率
+      taxClose = Math.round(perLot * (dayQty * TAX_DT + carryQty * TAX_NORMAL));
+      tax = taxClose + Math.round(perLot * openQty * TAX_DT);
+    } else {
+      // 回補空單：買進本身無證交稅，但留倉空單進場稅應為 0.3%，補收差額（以均價計）
+      taxClose = Math.round(pos.avg * 1000 * carryQty * (TAX_NORMAL - TAX_DT));
+      tax = taxClose;
+    }
+
     const gross = pos.qty > 0
       ? (price - pos.avg) * closeQty * 1000   // 平多
       : (pos.avg - price) * closeQty * 1000;  // 回補空單
     const entryCost = pos.feePaid * (closeQty / absBefore);
-    const exitCost = (f + tax) * (closeQty / qty);
-    netRealized = Math.round(gross - entryCost - exitCost);
+    netRealized = Math.round(gross - entryCost - f * (closeQty / qty) - taxClose);
     account.realized += netRealized;
     pos.feePaid -= entryCost;
+    pos.todayQty = Math.max(0, pos.todayQty - dayQty);
     pos.qty += signedQty;
     if (pos.qty === 0) {
       pos.avg = 0;
       pos.feePaid = 0;
+      pos.todayQty = 0;
     } else if (Math.sign(pos.qty) === Math.sign(signedQty)) {
-      // 反手：剩餘數量視為新倉
+      // 反手：剩餘數量視為今日新倉
       pos.avg = price;
-      pos.feePaid = (f + tax) * ((qty - closeQty) / qty);
+      pos.feePaid = f * (openQty / qty) +
+        (side === "sell" ? Math.round(perLot * openQty * TAX_DT) : 0);
+      pos.todayQty = openQty;
     }
   }
 
-  // 現金流：買進付款、賣出收款（放空以收款簡化處理）
-  account.cash += side === "buy" ? -(amount + f) : (amount - f - tax);
+  // 現金流：買進付款（回補留倉空單含補稅）、賣出收款（放空以收款簡化處理）
+  account.cash += side === "buy" ? -(amount + f + tax) : (amount - f - tax);
   if (pos.qty === 0) delete account.positions[cur.code];
   else account.positions[cur.code] = pos;
 
