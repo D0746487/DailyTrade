@@ -349,7 +349,7 @@ async function pollQuote() {
 
       renderQuote();
       renderDepth();
-      if (state.interval !== "1d") renderChart(true);
+      renderChart(true);   // 日K的當日形成中K棒也隨報價更新
       setStatus(`${q.time || ""} 更新`);
     }
     renderAccount();
@@ -404,6 +404,22 @@ async function loadDaily(code) {
 }
 
 // ────────────────────────── 圖表渲染 ──────────────────────────
+// 以分K合成「形成中」的當日K棒（開盤至 until 時點）
+function formingDailyFromBars(store, dayKey, dayStart, until) {
+  const bars = [...store.candles1m.values()]
+    .filter((b) => b.time >= dayStart && b.time <= until)
+    .sort((a, b) => a.time - b.time);
+  if (!bars.length) return null;
+  return {
+    time: dayKey,
+    open: bars[0].open,
+    high: Math.max(...bars.map((b) => b.high)),
+    low: Math.min(...bars.map((b) => b.low)),
+    close: bars[bars.length - 1].close,
+    volume: bars.reduce((s, b) => s + (b.volume || 0), 0),
+  };
+}
+
 function candlesFor(interval) {
   const cur = state.current;
   if (!cur) return [];
@@ -412,8 +428,40 @@ function candlesFor(interval) {
 
   if (interval === "1d") {
     const daily = store.daily || [];
-    // 回放模式：日K只顯示回放日之前的資料
-    return testing ? daily.filter((c) => c.time < state.sim.dayKey) : daily;
+
+    if (testing) {
+      // 回放模式：過去的日K + 回放日「形成中」K棒（隨虛擬時間成長，不暴露未來）
+      const past = daily.filter((c) => c.time < state.sim.dayKey);
+      const forming = formingDailyFromBars(
+        store, state.sim.dayKey, state.sim.dayStart, state.sim.time);
+      return forming ? [...past, forming] : past;
+    }
+
+    // 當日模式：補上今天「形成中」的K棒（優先用即時報價的開高低量）
+    const todayKey = keyOf(new Date());
+    let past = daily;
+    let existing = null;
+    if (daily.length && daily[daily.length - 1].time === todayKey) {
+      past = daily.slice(0, -1);
+      existing = daily[daily.length - 1];
+    }
+    let forming = null;
+    const q = state.quote;
+    if (q && q.code === cur.code && q.open != null && q.display != null) {
+      forming = {
+        time: todayKey,
+        open: q.open,
+        high: q.high != null ? q.high : q.display,
+        low: q.low != null ? q.low : q.display,
+        close: q.display,
+        volume: q.cumVol || 0,
+      };
+    } else {
+      const dayStart = Date.parse(`${todayKey}T00:00:00+08:00`) / 1000;
+      forming = formingDailyFromBars(store, todayKey, dayStart, Infinity);
+    }
+    forming = forming || existing;
+    return forming ? [...past, forming] : daily;
   }
 
   let m1 = [...store.candles1m.values()].sort((a, b) => a.time - b.time);
