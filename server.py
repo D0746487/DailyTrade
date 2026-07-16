@@ -423,9 +423,11 @@ class Handler(SimpleHTTPRequestHandler):
                 if not re.fullmatch(r"[0-9A-Za-z]{2,8}", code):
                     return self.send_json({"error": "bad code"}, 400)
                 fn = daily_otc if market == "otc" else daily_tse
-                candles = fn(code, months)
-                if not candles:   # 證交所/櫃買連不上（海外主機）→ Yahoo 備援
-                    candles = daily_yahoo(code, market)
+                if IS_CLOUD:
+                    # 海外主機：Yahoo 一次請求即得一年日K，遠快於逐月向證交所要
+                    candles = daily_yahoo(code, market) or fn(code, months)
+                else:
+                    candles = fn(code, months) or daily_yahoo(code, market)
                 return self.send_json({"candles": candles})
 
             if parsed.path == "/":
