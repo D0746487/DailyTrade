@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""台股當沖模擬器 - 本機伺服器
+"""台股交易模擬器 - 本機伺服器
 提供靜態網頁，並代理證交所/櫃買中心 API(避免瀏覽器 CORS 限制)。
 啟動: python server.py  →  http://localhost:8800
 """
@@ -461,7 +461,7 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     mode = "公開模式（訪客紀錄各自存瀏覽器）" if PUBLIC_MODE else "本機模式（紀錄存 data.json）"
-    print(f"台股當沖模擬器已啟動 → http://localhost:{PORT}  [{mode}]")
+    print(f"台股交易模擬器已啟動 → http://localhost:{PORT}  [{mode}]")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
