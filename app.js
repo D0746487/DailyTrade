@@ -287,6 +287,7 @@ async function loadIntraday(code, rng) {
     const store = getStore(code);
     for (const b of bars) store.candles1m.set(b.time, b);
     if (state.mode === "test") {
+      populateSimDays();   // 新載入的股票可能帶入更多交易日
       updateSimTick(true);
     } else if (state.current && state.current.code === code && state.interval !== "1d") {
       renderChart(true);
@@ -1065,16 +1066,46 @@ function applySim() {
   updateSimTick(true);
 }
 
-function initSimDefaults() {
-  if ($("simDate").value) return;
-  // 預設回放上一個交易日 09:00
-  const d = new Date();
-  do { d.setDate(d.getDate() - 1); } while (d.getDay() === 0 || d.getDay() === 6);
-  const max = new Date();
-  const min = new Date(); min.setDate(min.getDate() - 6);
-  $("simDate").value = keyOf(d);
-  $("simDate").min = keyOf(min);
-  $("simDate").max = keyOf(max);
+// 從已載入的分K收集實際交易日（自動排除週末與颱風假等休市日）
+function collectTradingDays() {
+  const days = new Set();
+  for (const code of Object.keys(state.stores)) {
+    for (const t of state.stores[code].candles1m.keys()) {
+      days.add(new Date(t * 1000).toLocaleDateString("en-CA", { timeZone: "Asia/Taipei" }));
+    }
+  }
+  return [...days].sort();
+}
+
+// 尚未開任何股票時，以台積電的分K作為交易日曆參考
+async function fetchDaysReference() {
+  try {
+    const res = await fetch("/api/intraday?code=2330&market=tse&interval=1m&range=7d");
+    const data = await res.json();
+    const store = getStore("2330");
+    for (const b of (data.candles || [])) store.candles1m.set(b.time, b);
+  } catch (e) { /* ignore */ }
+}
+
+async function populateSimDays() {
+  let days = collectTradingDays();
+  if (!days.length) {
+    await fetchDaysReference();
+    days = collectTradingDays();
+  }
+  const sel = $("simDate");
+  const prev = sel.value;
+  sel.innerHTML = days.map((d) => {
+    const wd = "日一二三四五六"[new Date(`${d}T00:00:00+08:00`).getDay()];
+    return `<option value="${d}">${d}（${wd}）</option>`;
+  }).join("");
+  if (days.includes(prev)) {
+    sel.value = prev;
+  } else {
+    const today = keyOf(new Date());
+    const past = days.filter((d) => d < today);
+    sel.value = past.length ? past[past.length - 1] : (days[days.length - 1] || "");
+  }
 }
 
 function setMode(mode) {
@@ -1089,13 +1120,12 @@ function setMode(mode) {
     if (!testAccount) testAccount = loadTestAccount();
     account = testAccount;
     clearInterval(state.backfillTimer);
-    initSimDefaults();
     // 回放預設看 1分K
     document.querySelectorAll(".tab").forEach((b) =>
       b.classList.toggle("active", b.dataset.interval === "1m"));
     state.interval = "1m";
     if (state.current) loadIntraday(state.current.code, "7d");
-    applySim();
+    populateSimDays().then(applySim);   // 交易日清單就緒後再套用
   } else {
     account = liveAccount;
     state.quote = null;
