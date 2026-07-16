@@ -223,10 +223,10 @@ def yahoo_quote_msg(code):
 
 
 def daily_yahoo(code, market):
-    """日K備援：Yahoo 近一年日K"""
+    """日K：Yahoo 近五年（供日K顯示與週K/月K聚合）"""
     for sfx in _suffixes_for(code, market):
         try:
-            result = yahoo_chart(code + sfx, "1d", "1y")
+            result = yahoo_chart(code + sfx, "1d", "5y")
         except Exception:
             continue
         if not result:
@@ -252,13 +252,17 @@ def daily_yahoo(code, market):
     return []
 
 
-def intraday_history(code, market, rng):
+INTERVAL_SEC = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600}
+
+
+def intraday_history(code, market, rng, interval="1m"):
     """分K歷史資料（證交所無此公開API，取自 Yahoo Finance 台股行情）
-    回傳 1 分K，時間為 unix 秒，成交量單位為張"""
+    時間為 unix 秒（依級別對齊），成交量單位為張"""
+    sec = INTERVAL_SEC.get(interval, 60)
     result = None
     for sfx in _suffixes_for(code, market):
         try:
-            result = yahoo_chart(code + sfx, "1m", rng)
+            result = yahoo_chart(code + sfx, interval, rng)
         except Exception:
             result = None
         if result:
@@ -276,7 +280,7 @@ def intraday_history(code, market, rng):
         if None in (o, h, l, c):
             continue
         v = vols[i] or 0
-        candles.append({"time": (t // 60) * 60, "open": o, "high": h,
+        candles.append({"time": (t // sec) * sec, "open": o, "high": h,
                         "low": l, "close": c, "volume": round(v / 1000)})
     return candles
 
@@ -409,12 +413,18 @@ class Handler(SimpleHTTPRequestHandler):
                 code = (qs.get("code") or [""])[0].strip()
                 market = (qs.get("market") or ["tse"])[0]
                 rng = (qs.get("range") or ["1d"])[0]
+                interval = (qs.get("interval") or ["1m"])[0]
                 if not re.fullmatch(r"[0-9A-Za-z]{2,8}", code):
                     return self.send_json({"error": "bad code"}, 400)
-                if rng not in ("1d", "2d", "5d", "7d"):
-                    rng = "1d"
+                if interval not in INTERVAL_SEC:
+                    interval = "1m"
+                # Yahoo 限制：1分K 最多約 8 天；其餘盤中級別最多 60 天
+                allowed = (("1d", "2d", "5d", "7d") if interval == "1m"
+                           else ("1d", "5d", "30d", "60d"))
+                if rng not in allowed:
+                    rng = allowed[-1]
                 return self.send_json(
-                    {"candles": intraday_history(code, market, rng)})
+                    {"candles": intraday_history(code, market, rng, interval)})
 
             if parsed.path == "/api/daily":
                 code = (qs.get("code") or [""])[0].strip()
@@ -423,11 +433,8 @@ class Handler(SimpleHTTPRequestHandler):
                 if not re.fullmatch(r"[0-9A-Za-z]{2,8}", code):
                     return self.send_json({"error": "bad code"}, 400)
                 fn = daily_otc if market == "otc" else daily_tse
-                if IS_CLOUD:
-                    # 海外主機：Yahoo 一次請求即得一年日K，遠快於逐月向證交所要
-                    candles = daily_yahoo(code, market) or fn(code, months)
-                else:
-                    candles = fn(code, months) or daily_yahoo(code, market)
+                # Yahoo 一次請求即得五年日K（供週K/月K聚合），證交所逐月請求留作備援
+                candles = daily_yahoo(code, market) or fn(code, months)
                 return self.send_json({"candles": candles})
 
             if parsed.path == "/":

@@ -179,9 +179,16 @@ const setStatus = (msg) => { $("chartStatus").textContent = msg || ""; };
 
 function getStore(code) {
   if (!state.stores[code]) {
-    state.stores[code] = { candles1m: new Map(), lastCumVol: null, daily: null, dailyLoading: false };
+    state.stores[code] = {
+      candles1m: new Map(), lastCumVol: null,
+      daily: null, dailyLoading: false,
+      intra: {}, intraLoading: {},   // 5m/15m/30m/60m 較長歷史（Yahoo 60天）
+    };
   }
-  return state.stores[code];
+  const s = state.stores[code];
+  s.intra = s.intra || {};
+  s.intraLoading = s.intraLoading || {};
+  return s;
 }
 
 // ────────────────────────── 搜尋 ──────────────────────────
@@ -420,11 +427,81 @@ function formingDailyFromBars(store, dayKey, dayStart, until) {
   };
 }
 
+// 分K聚合（秒為單位的 bucket）
+function aggregateBars(bars, bucketSec) {
+  const map = new Map();
+  for (const c of bars) {
+    const bucket = Math.floor(c.time / bucketSec) * bucketSec;
+    let b = map.get(bucket);
+    if (!b) {
+      b = { time: bucket, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume };
+      map.set(bucket, b);
+    } else {
+      b.high = Math.max(b.high, c.high);
+      b.low = Math.min(b.low, c.low);
+      b.close = c.close;
+      b.volume += c.volume;
+    }
+  }
+  return [...map.values()].sort((a, b) => a.time - b.time);
+}
+
+// 日K → 週K / 月K 聚合（time 為該區間第一個交易日的日期字串）
+function aggregateDaily(daily, interval) {
+  const bucketOf = (t) => {
+    if (interval === "1mo") return t.slice(0, 7);
+    const d = new Date(t + "T00:00:00Z");                 // 週K：以週一為界
+    d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+    return d.toISOString().slice(0, 10);
+  };
+  const map = new Map();
+  for (const c of daily) {
+    const key = bucketOf(c.time);
+    let b = map.get(key);
+    if (!b) {
+      b = { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume };
+      map.set(key, b);
+    } else {
+      b.high = Math.max(b.high, c.high);
+      b.low = Math.min(b.low, c.low);
+      b.close = c.close;
+      b.volume += c.volume;
+    }
+  }
+  return [...map.values()];
+}
+
+// 較長的 5/15/30/60分K 歷史（Yahoo 60天），當日模式使用
+async function loadIntradayCoarse(code, interval) {
+  const store = getStore(code);
+  if (store.intra[interval] || store.intraLoading[interval]) return;
+  store.intraLoading[interval] = true;
+  try {
+    const market = (state.current && state.current.market) || "tse";
+    const res = await fetch(`/api/intraday?code=${encodeURIComponent(code)}&market=${market}&interval=${interval}&range=60d`);
+    const data = await res.json();
+    store.intra[interval] = data.candles || [];
+    if (state.current && state.current.code === code && state.interval === interval) {
+      renderChart();
+    }
+  } catch (e) {
+    store.intra[interval] = [];
+  } finally {
+    store.intraLoading[interval] = false;
+  }
+}
+
+const AGG_SEC = { "5m": 300, "15m": 900, "30m": 1800, "60m": 3600 };
+
 function candlesFor(interval) {
   const cur = state.current;
   if (!cur) return [];
   const store = getStore(cur.code);
   const testing = state.mode === "test";
+
+  if (interval === "1wk" || interval === "1mo") {
+    return aggregateDaily(candlesFor("1d"), interval);   // 沿用日K的回放過濾與形成中K棒
+  }
 
   if (interval === "1d") {
     const daily = store.daily || [];
@@ -468,27 +545,25 @@ function candlesFor(interval) {
   if (testing) m1 = m1.filter((b) => b.time <= state.sim.time);   // 只顯示已發生的K棒
   if (interval === "1m") return m1;
 
-  // 5 分 K：由 1 分 K 聚合
-  const map = new Map();
-  for (const c of m1) {
-    const bucket = Math.floor(c.time / 300) * 300;
-    let b = map.get(bucket);
-    if (!b) {
-      b = { time: bucket, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume };
-      map.set(bucket, b);
-    } else {
-      b.high = Math.max(b.high, c.high);
-      b.low = Math.min(b.low, c.low);
-      b.close = c.close;
-      b.volume += c.volume;
-    }
+  // 5/15/30/60 分K：由 1 分K聚合
+  const sec = AGG_SEC[interval] || 300;
+  const agg = aggregateBars(m1, sec);
+  if (testing) return agg;   // 回放模式只用受時間過濾的 1 分K聚合
+
+  // 當日模式：合併 Yahoo 60 天歷史（未載入時先顯示近幾日聚合，載入完自動補上）
+  const hist = store.intra[interval];
+  if (!hist) {
+    loadIntradayCoarse(cur.code, interval);
+    return agg;
   }
+  const map = new Map(hist.map((b) => [b.time, b]));
+  for (const b of agg) map.set(b.time, b);   // 近期以即時合成覆蓋
   return [...map.values()].sort((a, b) => a.time - b.time);
 }
 
 function renderChart(liveUpdate = false) {
   const interval = state.interval;
-  const intraday = interval !== "1d";
+  const intraday = !["1d", "1wk", "1mo"].includes(interval);   // 分K用時間軸，日/週/月用日期軸
   const raw = candlesFor(interval);
   const prevClose = state.quote ? state.quote.prevClose : null;
 

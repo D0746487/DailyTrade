@@ -248,9 +248,9 @@ body {
   justify-content: space-between;
   padding-bottom: 8px;
 }
-.interval-tabs { display: flex; gap: 6px; }
+.interval-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .tab {
-  padding: 6px 16px;
+  padding: 6px 12px;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--panel2);
