@@ -771,6 +771,15 @@ function trade(side) {
 
 $("btnBuy").addEventListener("click", () => trade("buy"));
 $("btnSell").addEventListener("click", () => trade("sell"));
+
+// 張數 −/＋ 步進
+function stepQty(delta) {
+  const el = $("orderQty");
+  const v = Math.max(1, Math.floor(num(el.value) || 1) + delta);
+  el.value = v;
+}
+$("qtyMinus").addEventListener("click", () => stepQty(-1));
+$("qtyPlus").addEventListener("click", () => stepQty(1));
 $("btnReset").addEventListener("click", () => {
   const label = state.mode === "test" ? "測試帳戶" : "模擬帳戶";
   if (!confirm(`確定要重置${label}？（現金回到 10,000,000，清除部位與紀錄）`)) return;
