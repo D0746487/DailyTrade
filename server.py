@@ -143,14 +143,126 @@ def daily_otc(code, months):
     return candles
 
 
+# 內建台股清單（上市+上櫃，含中文名）：搜尋與市場別判定用，
+# 讓部署在海外主機（證交所會封鎖海外IP）時搜尋仍可用
+try:
+    with open(os.path.join(ROOT, "stocks.json"), encoding="utf-8") as _fh:
+        STOCK_LIST = json.load(_fh)
+except Exception:
+    STOCK_LIST = []
+STOCK_MARKET = {s["c"]: s["m"] for s in STOCK_LIST}
+STOCK_NAME = {s["c"]: s["n"] for s in STOCK_LIST}
+
+# 證交所即時 API 連線失敗追蹤：連續失敗後暫時直接走 Yahoo，避免每次輪詢都空等
+_mis_fail = {"count": 0, "until": 0.0}
+
+_yq_cache = {}   # Yahoo 報價快取 code → (時間戳, msg)
+
+
+def yahoo_chart(symbol, interval, rng):
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/"
+           f"{urllib.parse.quote(symbol)}?interval={interval}&range={rng}")
+    data = fetch_json(url, timeout=12)
+    return (data.get("chart", {}).get("result") or [None])[0]
+
+
+def _suffixes_for(code, market):
+    if market == "otc":
+        return [".TWO", ".TW"]
+    if market == "tse":
+        return [".TW", ".TWO"]
+    m = STOCK_MARKET.get(code)
+    if m == "otc":
+        return [".TWO", ".TW"]
+    return [".TW", ".TWO"]
+
+
+def yahoo_quote_msg(code):
+    """以 Yahoo 行情組出與證交所 msgArray 相容的報價（海外部署備援）"""
+    now = time.time()
+    hit = _yq_cache.get(code)
+    if hit and now - hit[0] < 5:
+        return hit[1]
+    msg = None
+    for sfx in _suffixes_for(code, None):
+        try:
+            result = yahoo_chart(code + sfx, "1m", "1d")
+        except Exception:
+            continue
+        if not result:
+            continue
+        meta = result.get("meta") or {}
+        price = meta.get("regularMarketPrice")
+        if price is None:
+            continue
+        qd = (result.get("indicators", {}).get("quote") or [{}])[0]
+        opens = [v for v in (qd.get("open") or []) if v is not None]
+        highs = [v for v in (qd.get("high") or []) if v is not None]
+        lows = [v for v in (qd.get("low") or []) if v is not None]
+        vols = [v for v in (qd.get("volume") or []) if v]
+        ts = result.get("timestamp") or []
+        mtime = meta.get("regularMarketTime") or (ts[-1] if ts else int(now))
+        vol = meta.get("regularMarketVolume") or sum(vols)
+        msg = {
+            "c": code,
+            "n": STOCK_NAME.get(code) or meta.get("shortName") or code,
+            "ex": "otc" if sfx == ".TWO" else "tse",
+            "z": str(price),
+            "y": str(meta.get("chartPreviousClose") or meta.get("previousClose") or ""),
+            "o": str(opens[0] if opens else price),
+            "h": str(meta.get("regularMarketDayHigh") or (max(highs) if highs else price)),
+            "l": str(meta.get("regularMarketDayLow") or (min(lows) if lows else price)),
+            "v": str(round(vol / 1000)),
+            "t": time.strftime("%H:%M:%S", time.gmtime(mtime + 8 * 3600)),
+            "tlong": str(mtime * 1000),
+            "a": "", "b": "", "f": "", "g": "", "u": "", "w": "",
+        }
+        break
+    _yq_cache[code] = (now, msg)
+    return msg
+
+
+def daily_yahoo(code, market):
+    """日K備援：Yahoo 近一年日K"""
+    for sfx in _suffixes_for(code, market):
+        try:
+            result = yahoo_chart(code + sfx, "1d", "1y")
+        except Exception:
+            continue
+        if not result:
+            continue
+        ts = result.get("timestamp") or []
+        qd = (result.get("indicators", {}).get("quote") or [{}])[0]
+        opens, highs = qd.get("open") or [], qd.get("high") or []
+        lows, closes = qd.get("low") or [], qd.get("close") or []
+        vols = qd.get("volume") or []
+        candles = []
+        for i, t in enumerate(ts):
+            o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+            if None in (o, h, l, c):
+                continue
+            candles.append({
+                "time": time.strftime("%Y-%m-%d", time.gmtime(t + 8 * 3600)),
+                "open": round(o, 2), "high": round(h, 2),
+                "low": round(l, 2), "close": round(c, 2),
+                "volume": round((vols[i] or 0) / 1000),
+            })
+        if candles:
+            return candles
+    return []
+
+
 def intraday_history(code, market, rng):
     """分K歷史資料（證交所無此公開API，取自 Yahoo Finance 台股行情）
     回傳 1 分K，時間為 unix 秒，成交量單位為張"""
-    suffix = ".TWO" if market == "otc" else ".TW"
-    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/"
-           f"{urllib.parse.quote(code + suffix)}?interval=1m&range={rng}")
-    data = fetch_json(url, timeout=15)
-    result = (data.get("chart", {}).get("result") or [None])[0]
+    result = None
+    for sfx in _suffixes_for(code, market):
+        try:
+            result = yahoo_chart(code + sfx, "1m", rng)
+        except Exception:
+            result = None
+        if result:
+            break
     if not result:
         return []
     ts = result.get("timestamp") or []
@@ -194,7 +306,21 @@ def otc_list():
 
 
 def search_suggestions(q):
-    """合併證交所(上市) codeQuery 與櫃買(上櫃)清單的搜尋結果"""
+    """搜尋：優先用內建清單（全球可用），無結果再嘗試證交所線上查詢"""
+    ql = q.lower()
+    starts, contains = [], []
+    for s in STOCK_LIST:
+        if s["c"].lower().startswith(ql):
+            starts.append(f"{s['c']}\t{s['n']}")
+        elif ql in s["n"].lower():
+            contains.append(f"{s['c']}\t{s['n']}")
+        if len(starts) >= 30:
+            break
+    local = starts + contains
+    if local:
+        return local[:30]
+
+    # 內建清單沒中（例如新上市股）→ 線上查詢（僅台灣IP可用）
     out, seen = [], set()
     try:
         url = ("https://www.twse.com.tw/rwd/zh/api/codeQuery?query="
@@ -258,12 +384,26 @@ class Handler(SimpleHTTPRequestHandler):
                 if (not codes or len(codes) > 20 or
                         any(not re.fullmatch(r"[0-9A-Za-z]{2,8}", c) for c in codes)):
                     return self.send_json({"error": "bad code"}, 400)
-                ex_ch = "|".join(f"tse_{c}.tw|otc_{c}.tw" for c in codes)
-                url = ("https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
-                       f"?ex_ch={urllib.parse.quote(ex_ch)}&json=1&delay=0&_="
-                       + str(int(time.time() * 1000)))
-                data = fetch_json(url, referer="https://mis.twse.com.tw/stock/index.jsp")
-                return self.send_json(data)
+                # 先試證交所即時行情；海外主機被封鎖時自動改用 Yahoo
+                now = time.time()
+                if now >= _mis_fail["until"]:
+                    try:
+                        ex_ch = "|".join(f"tse_{c}.tw|otc_{c}.tw" for c in codes)
+                        url = ("https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+                               f"?ex_ch={urllib.parse.quote(ex_ch)}&json=1&delay=0&_="
+                               + str(int(now * 1000)))
+                        data = fetch_json(
+                            url, referer="https://mis.twse.com.tw/stock/index.jsp")
+                        if any(m.get("n") for m in (data.get("msgArray") or [])):
+                            _mis_fail["count"] = 0
+                            return self.send_json(data)
+                        raise ValueError("empty msgArray")
+                    except Exception:
+                        _mis_fail["count"] += 1
+                        if _mis_fail["count"] >= 3:
+                            _mis_fail["until"] = now + 600  # 10分鐘內直接走 Yahoo
+                msgs = [m for m in (yahoo_quote_msg(c) for c in codes) if m]
+                return self.send_json({"msgArray": msgs, "source": "yahoo"})
 
             if parsed.path == "/api/intraday":
                 code = (qs.get("code") or [""])[0].strip()
@@ -283,7 +423,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if not re.fullmatch(r"[0-9A-Za-z]{2,8}", code):
                     return self.send_json({"error": "bad code"}, 400)
                 fn = daily_otc if market == "otc" else daily_tse
-                return self.send_json({"candles": fn(code, months)})
+                candles = fn(code, months)
+                if not candles:   # 證交所/櫃買連不上（海外主機）→ Yahoo 備援
+                    candles = daily_yahoo(code, market)
+                return self.send_json({"candles": candles})
 
             if parsed.path == "/":
                 self.path = "/index.html"
