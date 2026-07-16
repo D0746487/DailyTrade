@@ -10,6 +10,8 @@ const state = {
   interval: "1d",          // '1m' | '5m' | '1d'
   quote: null,              // 目前個股最新解析後報價
   quotes: {},               // code → 最新報價（含庫存與最愛）
+  mode: "live",            // 'live' 當日 | 'test' 回放測試
+  sim: { time: 0, dayKey: null, dayStart: 0, speed: 10, playing: false },
   pollTimer: null,
   backfillTimer: null,
   stores: {},               // code → { candles1m: Map, lastCumVol, daily, dailyLoading }
@@ -23,14 +25,33 @@ function defaultAccount() {
   return { cash: 10000000, positions: {}, realized: 0, log: [], daily: {} };
 }
 
-let account = defaultAccount();
+let account = defaultAccount();     // 指向目前使用中的帳戶（當日=正式、測試=測試帳戶）
+let liveAccount = account;          // 正式帳戶
+let testAccount = null;             // 測試（回放）帳戶，獨立保存
 let favorites = [];
 let serverStorage = true;   // 公開部署時為 false，改存訪客自己的瀏覽器
+const TEST_KEY = "daytrade-sim-test-account";
+
+// 模擬時間：當日模式=現在；測試模式=回放中的虛擬時間
+function simNow() {
+  return state.mode === "test" ? new Date(state.sim.time * 1000) : new Date();
+}
+
+function loadTestAccount() {
+  try {
+    const a = JSON.parse(localStorage.getItem(TEST_KEY));
+    if (a && typeof a.cash === "number") { a.daily = a.daily || {}; return a; }
+  } catch (e) { /* ignore */ }
+  return defaultAccount();
+}
 
 function loadLocal() {
   try {
     const a = JSON.parse(localStorage.getItem(ACCT_KEY));
-    if (a && typeof a.cash === "number") { account = a; account.daily = account.daily || {}; }
+    if (a && typeof a.cash === "number") {
+      account = liveAccount = a;
+      account.daily = account.daily || {};
+    }
   } catch (e) { /* ignore */ }
   try {
     const f = JSON.parse(localStorage.getItem(FAV_KEY));
@@ -48,7 +69,7 @@ async function bootState() {
       return;
     }
     if (s && s.account && typeof s.account.cash === "number") {
-      account = s.account;
+      account = liveAccount = s.account;
       account.daily = account.daily || {};
       favorites = Array.isArray(s.favorites) ? s.favorites : [];
       return;
@@ -59,11 +80,11 @@ async function bootState() {
   persistState();
 }
 
-// 寫回（本機模式→伺服器 data.json；公開模式→瀏覽器 localStorage）
+// 寫回正式帳戶（本機模式→伺服器 data.json；公開模式→瀏覽器 localStorage）
 let persistTimer = null;
 function persistState() {
   if (!serverStorage) {
-    localStorage.setItem(ACCT_KEY, JSON.stringify(account));
+    localStorage.setItem(ACCT_KEY, JSON.stringify(liveAccount));
     localStorage.setItem(FAV_KEY, JSON.stringify(favorites));
     return;
   }
@@ -72,12 +93,18 @@ function persistState() {
     fetch("/api/state", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ account, favorites }),
+      body: JSON.stringify({ account: liveAccount, favorites }),
     }).catch(() => { /* 下次變更時重試 */ });
   }, 200);
 }
 
-function saveAccount() { persistState(); }
+function saveAccount() {
+  if (state.mode === "test") {
+    localStorage.setItem(TEST_KEY, JSON.stringify(testAccount));
+  } else {
+    persistState();
+  }
+}
 function saveFavs() { persistState(); }
 function isFav(code) { return favorites.some((f) => f.code === code); }
 function toggleFav(code, name) {
@@ -224,6 +251,13 @@ async function openStock(code, name) {
   renderHoldings();
 
   clearInterval(state.backfillTimer);
+  if (state.mode === "test") {
+    loadDaily(code);
+    loadIntraday(code, "7d");        // 回放需要較長的分K歷史
+    renderChart();
+    updateSimTick(true);
+    return;
+  }
   await pollQuote();                 // 先抓一次（同時判定上市/上櫃）
 
   loadDaily(code);
@@ -245,7 +279,9 @@ async function loadIntraday(code, rng) {
     if (!bars.length) return;
     const store = getStore(code);
     for (const b of bars) store.candles1m.set(b.time, b);
-    if (state.current && state.current.code === code && state.interval !== "1d") {
+    if (state.mode === "test") {
+      updateSimTick(true);
+    } else if (state.current && state.current.code === code && state.interval !== "1d") {
       renderChart(true);
     }
   } catch (e) { /* 回補失敗不影響即時合成 */ }
@@ -276,8 +312,9 @@ function parseMsg(msg) {
   return q;
 }
 
-// 一次輪詢：目前個股 + 庫存 + 我的最愛
+// 一次輪詢：目前個股 + 庫存 + 我的最愛（測試模式改由回放引擎供價）
 async function pollQuote() {
+  if (state.mode === "test") return;
   const cur = state.current;
   const codes = new Set();
   if (cur) codes.add(cur.code);
@@ -371,10 +408,16 @@ function candlesFor(interval) {
   const cur = state.current;
   if (!cur) return [];
   const store = getStore(cur.code);
+  const testing = state.mode === "test";
 
-  if (interval === "1d") return store.daily || [];
+  if (interval === "1d") {
+    const daily = store.daily || [];
+    // 回放模式：日K只顯示回放日之前的資料
+    return testing ? daily.filter((c) => c.time < state.sim.dayKey) : daily;
+  }
 
-  const m1 = [...store.candles1m.values()].sort((a, b) => a.time - b.time);
+  let m1 = [...store.candles1m.values()].sort((a, b) => a.time - b.time);
+  if (testing) m1 = m1.filter((b) => b.time <= state.sim.time);   // 只顯示已發生的K棒
   if (interval === "1m") return m1;
 
   // 5 分 K：由 1 分 K 聚合
@@ -538,7 +581,7 @@ function positionPnl(pos, price) {
     : (pos.avg - price) * shares;
   const exitAmount = price * shares;
   const exitFee = fee(exitAmount);
-  const dayQty = pos.todayDate === keyOf(new Date())
+  const dayQty = pos.todayDate === keyOf(simNow())
     ? Math.min(pos.todayQty || 0, absQty) : 0;
   const carryQty = absQty - dayQty;
   const exitTax = pos.qty > 0
@@ -621,7 +664,7 @@ function fee(amount) { return Math.max(FEE_MIN, Math.round(amount * FEE_RATE)); 
 
 // 換日歸零「今日建立張數」：留倉部位賣出時改按一般稅率
 function rolloverPos(pos) {
-  const today = keyOf(new Date());
+  const today = keyOf(simNow());
   if (pos.todayDate !== today) {
     pos.todayQty = 0;
     pos.todayDate = today;
@@ -706,15 +749,14 @@ function trade(side) {
   else account.positions[cur.code] = pos;
 
   account.log.unshift({
-    time: new Date().toLocaleTimeString("zh-TW", { hour12: false }),
+    time: simNow().toLocaleTimeString("zh-TW", { hour12: false }),
     code: cur.code, name: cur.name, side, qty, price, fee: f, tax,
     realized: netRealized, closed: netRealized != null,
   });
   if (account.log.length > 200) account.log.length = 200;
 
-  // 每日損益彙總（供損益月曆使用）
-  const d = new Date();
-  const dkey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  // 每日損益彙總（供損益月曆使用；測試模式記在回放日期）
+  const dkey = keyOf(simNow());
   account.daily = account.daily || {};
   const rec = account.daily[dkey] || { pnl: 0, trades: 0 };
   rec.trades += 1;
@@ -730,8 +772,11 @@ function trade(side) {
 $("btnBuy").addEventListener("click", () => trade("buy"));
 $("btnSell").addEventListener("click", () => trade("sell"));
 $("btnReset").addEventListener("click", () => {
-  if (!confirm("確定要重置模擬帳戶？（現金回到 10,000,000，清除部位與紀錄）")) return;
-  account = { cash: 10000000, positions: {}, realized: 0, log: [], daily: {} };
+  const label = state.mode === "test" ? "測試帳戶" : "模擬帳戶";
+  if (!confirm(`確定要重置${label}？（現金回到 10,000,000，清除部位與紀錄）`)) return;
+  const fresh = defaultAccount();
+  if (state.mode === "test") testAccount = account = fresh;
+  else liveAccount = account = fresh;
   saveAccount();
   renderAccount();
   renderHoldings();
@@ -789,6 +834,170 @@ function renderLog() {
     </div>`;
   }).join("");
 }
+
+// ────────────────────────── 測試（回放）模式 ──────────────────────────
+// 以歷史分K重建指定時間點的行情：K線只畫到虛擬時間，報價取最後一根的收盤
+function simQuoteFor(code) {
+  const store = state.stores[code];
+  if (!store) return null;
+  const bars = [...store.candles1m.values()]
+    .filter((b) => b.time <= state.sim.time)
+    .sort((a, b) => a.time - b.time);
+  if (!bars.length) return null;
+  const dayBars = bars.filter((b) => b.time >= state.sim.dayStart);
+  if (!dayBars.length) return null;   // 回放日尚未開盤或該日無資料
+  const last = dayBars[dayBars.length - 1];
+
+  // 昨收：回放日之前的最後收盤（優先用分K，再用日K）
+  let prevClose = null;
+  const prevBars = bars.filter((b) => b.time < state.sim.dayStart);
+  if (prevBars.length) {
+    prevClose = prevBars[prevBars.length - 1].close;
+  } else if (store.daily) {
+    const prev = store.daily.filter((c) => c.time < state.sim.dayKey);
+    if (prev.length) prevClose = prev[prev.length - 1].close;
+  }
+
+  let name = code;
+  if (state.current && state.current.code === code) name = state.current.name || code;
+  else if (account.positions[code]) name = account.positions[code].name || code;
+  else { const f = favorites.find((x) => x.code === code); if (f) name = f.name; }
+
+  return {
+    code, name,
+    market: state.current && state.current.code === code ? state.current.market : null,
+    open: dayBars[0].open,
+    high: Math.max(...dayBars.map((b) => b.high)),
+    low: Math.min(...dayBars.map((b) => b.low)),
+    prevClose,
+    price: last.close,
+    display: last.close,
+    mid: null,
+    cumVol: dayBars.reduce((s, b) => s + (b.volume || 0), 0),
+    time: new Date(state.sim.time * 1000).toLocaleTimeString("zh-TW", { hour12: false, timeZone: "Asia/Taipei" }),
+    tlong: state.sim.time * 1000,
+    asks: [], bids: [], askVols: [], bidVols: [],
+    limitUp: null, limitDown: null,
+  };
+}
+
+function simClockText() {
+  const d = new Date(state.sim.time * 1000);
+  return `${state.sim.dayKey} ${d.toLocaleTimeString("zh-TW", { hour12: false, timeZone: "Asia/Taipei" })}`;
+}
+
+// 回放引擎每一步：更新虛擬報價、K線、帳戶顯示
+function updateSimTick(full = false) {
+  if (state.mode !== "test" || !state.sim.dayKey) return;
+  // 收盤即自動暫停
+  const dayEnd = state.sim.dayStart + 13.5 * 3600;
+  if (state.sim.time >= dayEnd) {
+    state.sim.time = dayEnd;
+    if (state.sim.playing) {
+      state.sim.playing = false;
+      $("simPlay").textContent = "▶ 播放";
+      setStatus(`回放 ${state.sim.dayKey} 已收盤`);
+    }
+  }
+  $("simClock").textContent = simClockText();
+
+  state.quotes = {};
+  for (const code of Object.keys(state.stores)) {
+    const q = simQuoteFor(code);
+    if (q) state.quotes[code] = q;
+  }
+  if (state.current) {
+    const q = state.quotes[state.current.code] || null;
+    state.quote = q;
+    renderQuote();
+    renderDepth();
+    renderChart(!full);
+    setStatus(q
+      ? `回放中 ${simClockText()}`
+      : "該時間無分K資料（僅能回放最近約 5 個交易日的盤中）");
+  }
+  renderAccount();
+  renderHoldings();
+  renderFavorites();
+}
+
+function applySim() {
+  const dateStr = $("simDate").value;
+  const timeStr = $("simTime").value || "09:00";
+  if (!dateStr) return;
+  state.sim.dayKey = dateStr;
+  state.sim.dayStart = Date.parse(`${dateStr}T00:00:00+08:00`) / 1000;
+  state.sim.time = Date.parse(`${dateStr}T${timeStr}:00+08:00`) / 1000;
+  state.sim.playing = true;
+  $("simPlay").textContent = "⏸ 暫停";
+  updateSimTick(true);
+}
+
+function initSimDefaults() {
+  if ($("simDate").value) return;
+  // 預設回放上一個交易日 09:00
+  const d = new Date();
+  do { d.setDate(d.getDate() - 1); } while (d.getDay() === 0 || d.getDay() === 6);
+  const max = new Date();
+  const min = new Date(); min.setDate(min.getDate() - 6);
+  $("simDate").value = keyOf(d);
+  $("simDate").min = keyOf(min);
+  $("simDate").max = keyOf(max);
+}
+
+function setMode(mode) {
+  if (state.mode === mode) return;
+  saveAccount();                      // 切換前保存目前帳戶
+  state.mode = mode;
+  $("modeLive").classList.toggle("active", mode === "live");
+  $("modeTest").classList.toggle("active", mode === "test");
+  $("testBar").classList.toggle("hidden", mode !== "test");
+
+  if (mode === "test") {
+    if (!testAccount) testAccount = loadTestAccount();
+    account = testAccount;
+    clearInterval(state.backfillTimer);
+    initSimDefaults();
+    // 回放預設看 1分K
+    document.querySelectorAll(".tab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.interval === "1m"));
+    state.interval = "1m";
+    if (state.current) loadIntraday(state.current.code, "7d");
+    applySim();
+  } else {
+    account = liveAccount;
+    state.quote = null;
+    state.quotes = {};
+    setStatus("");
+    if (state.current) openStock(state.current.code, state.current.name);
+    else pollQuote();
+  }
+  renderAccount();
+  renderHoldings();
+  renderFavorites();
+  renderLog();
+  renderChart();
+  renderQuote();
+}
+
+$("modeLive").addEventListener("click", () => setMode("live"));
+$("modeTest").addEventListener("click", () => setMode("test"));
+$("simApply").addEventListener("click", applySim);
+$("simPlay").addEventListener("click", () => {
+  state.sim.playing = !state.sim.playing;
+  $("simPlay").textContent = state.sim.playing ? "⏸ 暫停" : "▶ 播放";
+});
+$("simSpeed").addEventListener("change", () => {
+  state.sim.speed = parseInt($("simSpeed").value, 10) || 10;
+});
+
+// 虛擬時鐘：每秒前進 speed 秒
+setInterval(() => {
+  if (state.mode === "test" && state.sim.playing) {
+    state.sim.time += state.sim.speed;
+    updateSimTick();
+  }
+}, 1000);
 
 // ────────────────────────── 損益月曆 ──────────────────────────
 const calState = { y: new Date().getFullYear(), m: new Date().getMonth() };

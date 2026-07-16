@@ -12,12 +12,32 @@
 <body>
 <header class="topbar">
   <div class="brand">📈 台股當沖模擬器 <span class="brand-credit">製作By Wan</span></div>
+  <div class="mode-toggle">
+    <button id="modeLive" class="mtab active">當日</button>
+    <button id="modeTest" class="mtab">測試</button>
+  </div>
   <button id="calBtn" class="cal-btn" title="損益月曆">📅</button>
   <div class="search-wrap">
     <input id="searchInput" type="text" placeholder="搜尋股票代碼或名稱，如 2330" autocomplete="off">
     <div id="searchDropdown" class="search-dropdown hidden"></div>
   </div>
 </header>
+
+<!-- 測試（回放）控制列 -->
+<div id="testBar" class="test-bar hidden">
+  <span class="tb-label">⏱ 回放</span>
+  <input type="date" id="simDate">
+  <input type="time" id="simTime" value="09:00" step="60">
+  <button id="simApply">套用</button>
+  <button id="simPlay">⏸ 暫停</button>
+  <select id="simSpeed">
+    <option value="1">1×</option>
+    <option value="10" selected>10×</option>
+    <option value="60">60×</option>
+  </select>
+  <span id="simClock" class="tb-clock mono"></span>
+  <span class="tb-note">測試模式使用獨立測試帳戶（僅能回放最近約 5 個交易日）</span>
+</div>
 
 <main class="layout">
   <!-- 左側：我的最愛 / 庫存 -->
