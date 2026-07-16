@@ -38,6 +38,13 @@ body {
 }
 
 .brand { font-size: 19px; font-weight: 700; letter-spacing: 1px; }
+.brand-credit {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+  letter-spacing: 0;
+  margin-left: 6px;
+}
 
 .cal-btn {
   margin-left: auto;
