@@ -239,14 +239,37 @@ body {
   .layout { grid-template-columns: 200px 1fr 280px; }
 }
 
-/* 窄螢幕改為單欄堆疊 */
+/* 窄螢幕改為單欄堆疊：K線優先，最愛/庫存次之，下單第三 */
 @media (max-width: 900px) {
   body { overflow: auto; }
-  .layout { grid-template-columns: 1fr; overflow-y: auto; }
-  .left-panel { max-height: 260px; }
-  .chart-panel { min-height: 60vh; }
-  .chart-container { min-height: 320px; }
+  .layout { grid-template-columns: 1fr; overflow-y: auto; gap: 10px; padding: 10px; }
+  .chart-panel { order: 1; min-height: auto; }
+  .left-panel { order: 2; max-height: 300px; }
+  .side-panel { order: 3; overflow-y: visible; }
+  .chart-container { flex: none; height: 46vh; min-height: 280px; }
   .search-wrap { width: min(320px, 55vw); }
+}
+
+/* 手機直立 */
+@media (max-width: 600px) {
+  .topbar { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
+  .brand { font-size: 16px; }
+  .brand-credit { display: block; margin-left: 26px; }
+  .cal-btn { margin-right: 0; }
+  .search-wrap { width: 100%; order: 3; }
+
+  .quote-bar { gap: 8px 12px; }
+  .q-name { font-size: 16px; }
+  .q-price { font-size: 22px; }
+  .q-chg { font-size: 13px; }
+  .q-item { font-size: 12px; }
+
+  .chart-toolbar { flex-wrap: wrap; gap: 6px; }
+  .ma-legend { font-size: 11px; gap: 3px 8px; }
+  .tab { padding: 8px 14px; }
+
+  .order-buttons button { padding: 12px 0; }
+  .chart-container { height: 42vh; min-height: 240px; }
 }
 
 /* ── 右側欄 ── */
