@@ -1056,7 +1056,11 @@ function updateSimTick(full = false) {
 
 function applySim() {
   const dateStr = $("simDate").value;
-  const timeStr = $("simTime").value || "09:00";
+  let timeStr = $("simTime").value || "09:00";
+  // 限制在台股盤中時段 09:00–13:30
+  if (timeStr < "09:00") timeStr = "09:00";
+  if (timeStr > "13:30") timeStr = "13:30";
+  $("simTime").value = timeStr;
   if (!dateStr) return;
   state.sim.dayKey = dateStr;
   state.sim.dayStart = Date.parse(`${dateStr}T00:00:00+08:00`) / 1000;
