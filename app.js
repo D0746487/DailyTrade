@@ -305,18 +305,23 @@ function parseMsg(msg) {
     cumVol: num(msg.v),              // 累積成交量（張）
     time: msg.t,
     tlong: num(msg.tlong),
-    asks: (msg.a || "").split("_").filter(Boolean).map(num),
-    bids: (msg.b || "").split("_").filter(Boolean).map(num),
+    // 價格 0 視為無效（漲/跌停鎖死時，證交所以 0.0000 表示市價單堆疊檔位）
+    asks: (msg.a || "").split("_").filter(Boolean).map(num).map((v) => (v > 0 ? v : null)),
+    bids: (msg.b || "").split("_").filter(Boolean).map(num).map((v) => (v > 0 ? v : null)),
     askVols: (msg.f || "").split("_").filter(Boolean).map(num),
     bidVols: (msg.g || "").split("_").filter(Boolean).map(num),
     limitUp: num(msg.u), limitDown: num(msg.w),
   };
-  // 證交所匿名端點常遮蔽最新成交價(z)，以買賣一檔中價推估
-  const b1 = q.bids[0], a1 = q.asks[0];
+  // 證交所匿名端點常遮蔽最新成交價(z)，以買賣最佳「有效」檔位推估
+  // 跌停鎖死：無買方 → 用賣一(跌停價)；漲停鎖死：無賣方 → 用買一(漲停價)
+  const b1 = q.bids.find((v) => v != null) ?? null;
+  const a1 = q.asks.find((v) => v != null) ?? null;
   q.mid = b1 != null && a1 != null
     ? Math.round(((b1 + a1) / 2) * 100) / 100
     : (b1 ?? a1 ?? null);
-  q.display = q.price ?? q.mid ?? num(msg.pz) ?? q.prevClose;
+  const px = q.price != null && q.price > 0 ? q.price : null;
+  q.price = px;
+  q.display = px ?? q.mid ?? num(msg.pz) ?? q.prevClose;
   return q;
 }
 

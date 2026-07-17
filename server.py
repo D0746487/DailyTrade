@@ -356,6 +356,12 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 安靜模式
 
+    def end_headers(self):
+        # 靜態檔案要求瀏覽器每次重新驗證，避免更新後仍執行舊版前端
+        if not self.path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def send_json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
